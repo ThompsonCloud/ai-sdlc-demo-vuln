@@ -1,0 +1,5 @@
+name: Security (reuses central config)
+on: [push, pull_request]
+jobs:
+  security:
+    uses: ThompsonCloud/ai-sdlc-security-config/.github/workflows/security-review.yml@main
