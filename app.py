@@ -30,7 +30,7 @@ def get_order(order_id):
     return jsonify(row)
 
 
-@app.route("/admin/delete_user")
+@app.route("/admin/delete_user", methods=["POST"])
 def admin_delete_user():
     require_admin(request)  # 功能级授权
     user_id = request.args.get("user_id")
