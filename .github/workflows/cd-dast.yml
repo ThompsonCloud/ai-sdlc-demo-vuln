@@ -1,0 +1,63 @@
+name: CD · 部署到测试环境 + 动态渗透门禁 (strix)
+
+# 手动触发的 CD 段演示：部署一份测试环境 → strix 黑盒渗透查越权 → 按结果门禁。
+# 生产里"部署"这一步是 Actions + OIDC 部署到 staging；这里用自托管 runner 就地拉起一个
+# 易受攻击 API（VAmPI）作测试环境，演示"部署后动态安全测试 + 门禁"这条 DevSecOps CD 闭环。
+on:
+  workflow_dispatch: {}
+
+jobs:
+  deploy-and-dast:
+    runs-on: [self-hosted, ai-sdlc]
+    steps:
+      - name: 1) 部署到测试环境（拉起易受攻击 API + 初始化数据）
+        shell: bash
+        run: |
+          docker rm -f vampi-test >/dev/null 2>&1 || true
+          docker run -d --name vampi-test -p 5001:5000 erev0s/vampi
+          for i in $(seq 1 25); do curl -sf http://localhost:5001/ >/dev/null 2>&1 && break; sleep 3; done
+          curl -s -o /dev/null -w "createdb=%{http_code}\n" http://localhost:5001/createdb
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5001/)
+          echo "test-env root=$code"
+          [ "$code" = "200" ] || { echo "::error::测试环境部署失败"; exit 1; }
+          echo "## 🚀 已部署测试环境 VAmPI（root=$code）" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 2) 动态渗透（strix 黑盒查越权，走通义千问）
+        shell: bash
+        run: |
+          export HOME=/root
+          export PATH=$PATH:/usr/local/bin:/usr/bin:/root/.strix/bin
+          # 172.17.0.1 = docker 网关，strix 的 agent 容器经它回到宿主机上的 VAmPI:5001
+          timeout 780 strix -t http://172.17.0.1:5001 -n -m quick --max-budget 2 \
+            --instruction "This is VAmPI, a deliberately vulnerable REST API. Focus on BOLA/IDOR and broken function-level authorization: enumerate users at /users/v1, register two users, then try reading or modifying another user's objects (books at /books/v1, email at /users/v1/{username}/email), and try admin-only actions as a normal user. Report each with a concrete PoC request." \
+            > strix-out.txt 2>&1 || true
+          # 汇总"人可读"的发现来源：stdout + 近 20 分钟内 strix 生成的报告
+          : > all-findings.txt
+          cat strix-out.txt >> all-findings.txt 2>/dev/null || true
+          for rpt in $(find /tmp/strix_runs -type f \( -iname '*.md' -o -iname '*.json' -o -iname '*.txt' \) -newermt '-20 min' 2>/dev/null | head -20); do
+            echo "----- $rpt -----" >> all-findings.txt; cat "$rpt" >> all-findings.txt 2>/dev/null || true
+          done
+          {
+            echo "## 🕵️ strix 动态渗透摘要"
+            echo '```'
+            grep -iaE 'BOLA|IDOR|broken object|broken function|authorization|unauthor|vulnerab|severity|critical|high|越权' all-findings.txt | sort -u | head -25 || echo "（无匹配行）"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "----- strix stdout 尾部 -----"; tail -30 strix-out.txt
+
+      - name: 3) CD 安全门禁（动态渗透发现越权即阻断发布）
+        shell: bash
+        run: |
+          if grep -qiaE 'BOLA|IDOR|broken object|broken function|unauthor|越权' all-findings.txt; then
+            n=$(grep -ciaE 'BOLA|IDOR|broken object|broken function|unauthor|越权' all-findings.txt)
+            echo "::error::CD 门禁 BLOCK：动态渗透发现越权/未授权（约 $n 处命中），阻断发布"
+            echo "## ⛔ CD 门禁 BLOCK：动态渗透发现越权，阻断发布" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "✅ CD 门禁 PASS：动态渗透未发现越权"
+          echo "## ✅ CD 门禁 PASS：未发现越权" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 4) 清理测试环境
+        if: always()
+        shell: bash
+        run: docker rm -f vampi-test >/dev/null 2>&1 || true
