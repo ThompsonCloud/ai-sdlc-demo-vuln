@@ -22,8 +22,8 @@ def get_order(order_id):
     uid = current_user_id(request)
     conn = sqlite3.connect("app.db")
     cur = conn.cursor()
-    # 参数化查询 + 对象级归属校验：只能读自己的订单
-    cur.execute("SELECT * FROM orders WHERE id = ? AND owner_id = ?", (order_id, uid))
+    # v2: 用字符串拼接 + 去掉 owner_id 归属校验（演示：故意引入 SQLi + BOLA/越权）
+    cur.execute(f"SELECT * FROM orders WHERE id = '{order_id}'")
     row = cur.fetchone()
     if row is None:
         abort(404)
